@@ -1,0 +1,14 @@
+# How to Contribute
+
+This repository is for code that supports talks and other activities the Google Workspace Developer Relations team engages in. As such, it is **not** open to external contributions.
+
+## Required Steps
+
+1. Read and understand the OSS release and patching guidelines, which includes having adequate license headers.
+1. Create a sub-directory under one of the already existing root directories with your demo's name. Do not expand the directory structure further than `/category/demo-name/**`. Create a new root directory only if none of the existing ones are appropriate.
+1. Open a PR with your changes and wait for a CODEOWNER to review and merge.
+
+## Community Guidelines
+
+This project follows
+[Google's Open Source Community Guidelines](https://opensource.google/conduct/).

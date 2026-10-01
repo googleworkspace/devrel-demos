@@ -1,0 +1,95 @@
+{
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/workspace.studio.trigger",
+    "https://www.googleapis.com/auth/userinfo.email"
+  ],
+  "addOns": {
+    "common": {
+      "name": "PulseWell Sports Platform",
+      "logoUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/fitness_center/default/24px.svg",
+      "openLinkUrlPrefixes": [
+        "https://europe-west1-customstarter.cloudfunctions.net/",
+        "https://customstarter.web.app/"
+      ]
+    },
+    "studio": {
+      "flows": {
+        "workflowElements": [
+          {
+            "id": "newSportsRegistrationStarter",
+            "state": "ACTIVE",
+            "name": "New Sports Registration",
+            "description": "Fires when an employee signs up for a sports offering in PulseWell.",
+            "workflowTrigger": {
+              "inputs": [
+                {
+                  "id": "categoryFilter",
+                  "description": "Optional sports category filter (e.g. ALL, Mind & Body, Cardio & Endurance).",
+                  "cardinality": "SINGLE",
+                  "dataType": {
+                    "basicType": "STRING"
+                  }
+                }
+              ],
+              "outputs": [
+                {
+                  "id": "recipientEmail",
+                  "description": "Participant email",
+                  "cardinality": "SINGLE",
+                  "dataType": {
+                    "basicType": "EMAIL_ADDRESS"
+                  }
+                },
+                {
+                  "id": "participantName",
+                  "description": "Paricipant name",
+                  "cardinality": "SINGLE",
+                  "dataType": {
+                    "basicType": "STRING"
+                  }
+                },
+                {
+                  "id": "offeringTitle",
+                  "description": "Course title",
+                  "cardinality": "SINGLE",
+                  "dataType": {
+                    "basicType": "STRING"
+                  }
+                },
+                {
+                  "id": "offeringCategory",
+                  "description": "Course category",
+                  "cardinality": "SINGLE",
+                  "dataType": {
+                    "basicType": "STRING"
+                  }
+                },
+                {
+                  "id": "offeringSchedule",
+                  "description": "Course time",
+                  "cardinality": "SINGLE",
+                  "dataType": {
+                    "basicType": "STRING"
+                  }
+                },
+                {
+                  "id": "instructorAndLocation",
+                  "description": "Instructor and location",
+                  "cardinality": "SINGLE",
+                  "dataType": {
+                    "basicType": "STRING"
+                  }
+                }
+              ],
+              "onConfigFunction": "https://europe-west1-customstarter.cloudfunctions.net/onConfigSportsTrigger",
+              "onManageFunction": "https://europe-west1-customstarter.cloudfunctions.net/onManageSportsTrigger"
+            }
+          }
+        ]
+      }
+    },
+    "httpOptions": {
+      "granularOauthPermissionSupport": "OPT_IN"
+    }
+  }
+}

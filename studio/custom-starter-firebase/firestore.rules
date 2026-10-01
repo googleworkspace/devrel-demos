@@ -1,0 +1,16 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow reading and creating sports offerings & registrations for the demo
+    match /offerings/{offeringId} {
+      allow read, write: if true;
+    }
+    match /registrations/{registrationId} {
+      allow read, write: if true;
+    }
+    match /studioTriggers/{triggerId} {
+      allow read, write: if true;
+    }
+  }
+}

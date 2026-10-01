@@ -1,0 +1,17 @@
+{
+  "name": "pulsewell-functions",
+  "version": "1.0.0",
+  "description": "Modular Firebase Cloud Functions for PulseWell Workspace Studio Custom Starter",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "lint": "oxlint ."
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0",
+    "firebase-functions": "^6.3.0"
+  }
+}

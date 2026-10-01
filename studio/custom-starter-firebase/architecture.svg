@@ -19,7 +19,7 @@
 
   <!-- Title -->
   <text x="40" y="42" font-size="20" font-weight="700" fill="#0f172a">PulseWell — Google Workspace Studio Custom Starter Architecture</text>
-  <text x="40" y="64" font-size="13" fill="#475569">Per-user OAuth 2.0 credential isolation, subscription lifecycle management, and asynchronous event firing</text>
+  <text x="40" y="64" font-size="13" fill="#475569">Dual authorization (Google Workspace OAuth 2.0 + PulseWell Firebase Auth), subscription lifecycle, and asynchronous event firing</text>
 
   <!-- Actor / Participant Columns Header -->
   <g transform="translate(0, 82)">
@@ -28,7 +28,7 @@
     <text x="115" y="35" text-anchor="middle" font-size="10" fill="#94a3b8">Flow Builder &amp; API</text>
 
     <rect x="230" y="0" width="170" height="44" rx="8" fill="#1d4ed8" filter="url(#shadow)"/>
-    <text x="315" y="20" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">Config &amp; OAuth</text>
+    <text x="315" y="20" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">Config &amp; Dual Auth</text>
     <text x="315" y="35" text-anchor="middle" font-size="10" fill="#bfdbfe">onConfig / oauthStart / Callback</text>
 
     <rect x="440" y="0" width="170" height="44" rx="8" fill="#047857" filter="url(#shadow)"/>
@@ -52,30 +52,34 @@
   <line x1="895" y1="126" x2="895" y2="730" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="5,5"/>
 
   <!-- ================= PHASE 1 ================= -->
-  <rect x="30" y="142" width="940" height="175" rx="10" fill="#eff6ff" fill-opacity="0.75" stroke="#bfdbfe" stroke-width="1.5"/>
-  <rect x="42" y="152" width="380" height="24" rx="5" fill="#dbeafe"/>
-  <text x="52" y="168" font-size="12" font-weight="700" fill="#1e40af">PHASE 1 — Starter Card Configuration &amp; Per-User Offline OAuth 2.0</text>
+  <rect x="30" y="142" width="940" height="182" rx="10" fill="#eff6ff" fill-opacity="0.75" stroke="#bfdbfe" stroke-width="1.5"/>
+  <rect x="42" y="152" width="465" height="24" rx="5" fill="#dbeafe"/>
+  <text x="52" y="168" font-size="12" font-weight="700" fill="#1e40af">PHASE 1 — Starter Card Configuration &amp; Two-Button Dual Authorization</text>
 
   <!-- Step 1 -->
-  <line x1="115" y1="196" x2="307" y2="196" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
-  <text x="211" y="190" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">1. POST /onConfigSportsTrigger (userIdToken / userOAuthToken)</text>
+  <line x1="115" y1="194" x2="307" y2="194" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <text x="211" y="188" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">1. POST /onConfigSportsTrigger (userIdToken / userOAuthToken)</text>
 
   <!-- Step 2 -->
-  <line x1="315" y1="224" x2="714" y2="224" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
-  <text x="515" y="218" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">2. Resolve userId (sub) &amp; check /studioAuth/{userId}</text>
+  <line x1="315" y1="220" x2="714" y2="220" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <text x="515" y="214" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">2. Resolve userId (sub) &amp; check /studioAuth/{userId} (refreshToken + pulseUid)</text>
 
   <!-- Step 3 -->
-  <line x1="315" y1="254" x2="123" y2="254" stroke="#2563eb" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arrow-blue)"/>
-  <text x="215" y="248" text-anchor="middle" font-size="11" fill="#1e3a8a">3. Return Card UI (Authorize button w/ signed state + Filter)</text>
+  <line x1="315" y1="246" x2="123" y2="246" stroke="#2563eb" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arrow-blue)"/>
+  <text x="215" y="240" text-anchor="middle" font-size="11" fill="#1e3a8a">3. Return Card UI (2 Auth Buttons w/ HMAC-signed state + Filter)</text>
 
-  <!-- Step 4 -->
-  <line x1="315" y1="290" x2="714" y2="290" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
-  <text x="515" y="284" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">4. OAuth Overlay (/oauthStart?state=... → /oauthCallback): Verify state &amp; id_token, save refreshToken</text>
+  <!-- Step 4a -->
+  <line x1="315" y1="276" x2="714" y2="276" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <text x="515" y="270" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1e3a8a">4a. Button 1 (GWS OAuth): GET /oauthStart → /oauthCallback verifies state &amp; id_token, stores refreshToken</text>
+
+  <!-- Step 4b -->
+  <line x1="895" y1="306" x2="323" y2="306" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <text x="609" y="300" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1e3a8a">4b. Button 2 (PulseWell Admin): customstarter.web.app/?studioState=... → POST /oauthStart stores pulseUid</text>
 
   <!-- ================= PHASE 2 ================= -->
-  <rect x="30" y="332" width="940" height="145" rx="10" fill="#ecfdf5" fill-opacity="0.75" stroke="#a7f3d0" stroke-width="1.5"/>
-  <rect x="42" y="342" width="380" height="24" rx="5" fill="#d1fae5"/>
-  <text x="52" y="358" font-size="12" font-weight="700" fill="#065f46">PHASE 2 — Subscription Lifecycle (Turn Flow On / Off in Studio)</text>
+  <rect x="30" y="334" width="940" height="145" rx="10" fill="#ecfdf5" fill-opacity="0.75" stroke="#a7f3d0" stroke-width="1.5"/>
+  <rect x="42" y="344" width="440" height="24" rx="5" fill="#d1fae5"/>
+  <text x="52" y="360" font-size="12" font-weight="700" fill="#065f46">PHASE 2 — Subscription Lifecycle &amp; Dual-Auth Gatekeeper (Turn Flow On / Off)</text>
 
   <!-- Step 5 -->
   <line x1="115" y1="390" x2="517" y2="390" stroke="#059669" stroke-width="2" marker-end="url(#arrow-green)"/>
@@ -83,8 +87,8 @@
 
   <!-- Step 6 -->
   <line x1="525" y1="422" x2="714" y2="422" stroke="#059669" stroke-width="2" marker-end="url(#arrow-green)"/>
-  <text x="620" y="415" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">6. Save { triggerId, userId, notifyUri }</text>
-  <text x="620" y="435" text-anchor="middle" font-size="10" fill="#047857">in /studioTriggers/{triggerId}</text>
+  <text x="620" y="415" text-anchor="middle" font-size="11" font-weight="600" fill="#065f46">6. Verify refreshToken + pulseUid &amp; save</text>
+  <text x="620" y="435" text-anchor="middle" font-size="10" fill="#047857">/studioTriggers/{triggerId}</text>
 
   <!-- Step 7 -->
   <line x1="115" y1="456" x2="714" y2="456" stroke="#059669" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#arrow-green)"/>

@@ -55,7 +55,7 @@ export const oauthStart = onRequest(
     invoker: 'public', // must be public because the call is not made via the add-on service account
     secrets: [oauthClientId, oauthClientSecret],
   },
-  (req, res) => handleOAuthStart(req, res)
+  (req, res) => handleOAuthStart(req, res, db)
 )
 
 /**

@@ -2,12 +2,12 @@
 
 ## 1. Overview
 
-**PulseWell** is an end-to-end reference application demonstrating how to build, authorize, and fire a **Google Workspace Studio Custom Starter** (`workflowTrigger`) using an **HTTP Alternate Runtime** backed by **Firebase Hosting**, **Cloud Firestore**, **Cloud Functions for Firebase (2nd Gen)**, and **Google Cloud Secret Manager**.
+**PulseWell** is an end-to-end reference application demonstrating how to build, authorize, and fire a **Google Workspace Studio Custom Starter** (`workflowTrigger`) using an **HTTP Alternate Runtime** backed by **Firebase Hosting**, **Firebase Authentication**, **Cloud Firestore**, **Cloud Functions for Firebase (2nd Gen)**, and **Google Cloud Secret Manager**.
 
 When an employee signs up for a campus health or sports session in the PulseWell web app:
 1. The registration is written to the `registrations` collection in Cloud Firestore.
 2. A Firestore-triggered Cloud Function (`onRegistrationCreated`) detects the new registration directly via Eventarc.
-3. For each matching active starter subscription in `/studioTriggers/{triggerId}`, `onRegistrationCreated` looks up the trigger owner's offline OAuth 2.0 refresh token in `/studioAuth/{userId}`, exchanges it for a fresh access token, and calls the Google Workspace Studio API (`POST https://workspacestudio.googleapis.com/v1/triggers/{triggerId}:fire`).
+3. For each matching active starter subscription in `/studioTriggers/{triggerId}`, `onRegistrationCreated` verifies that the trigger owner has a linked PulseWell Admin account (`pulseUid`) and exchanges their offline OAuth 2.0 refresh token in `/studioAuth/{userId}` for a fresh access token, then calls the Google Workspace Studio API (`POST https://workspacestudio.googleapis.com/v1/triggers/{triggerId}:fire`).
 4. Google Workspace Studio executes the user's automated flow (for example, sending a personalized confirmation email via Gmail using the starter's output variables).
 
 ---
@@ -22,32 +22,36 @@ When an employee signs up for a campus health or sports session in the PulseWell
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Admin as Workspace Studio User
+    actor Admin as Workspace Studio & PulseWell Admin
     participant Studio as Google Workspace Studio
     participant ConfigFn as onConfigSportsTrigger / oauthStart / oauthCallback
     participant ManageFn as onManageSportsTrigger
     participant DB as Cloud Firestore
     participant Secrets as Cloud Secret Manager
     actor Employee as PulseWell Web User
-    participant WebApp as PulseWell React App
+    participant WebApp as PulseWell React App (Firebase Auth)
     participant EventFn as onRegistrationCreated
 
     rect rgb(240, 249, 255)
-    Note over Admin,Secrets: Phase 1 — Starter Configuration & Per-User Offline OAuth 2.0
+    Note over Admin,WebApp: Phase 1 — Starter Configuration & Two-Button Dual Authorization
     Admin->>Studio: Add "New Sports Registration" starter to Flow
     Studio->>ConfigFn: POST /onConfigSportsTrigger (authorizationEventObject)
-    ConfigFn->>DB: Resolve userId (sub) & check /studioAuth/{userId}
-    ConfigFn-->>Studio: Return Card UI (Authorize button with HMAC-signed state + Category Filter)
-    Admin->>ConfigFn: Click "Authorize PulseWell Offline Access" -> GET /oauthStart?state=<signedState>
+    ConfigFn->>DB: Resolve userId (sub) & check /studioAuth/{userId} (refreshToken + pulseUid)
+    ConfigFn-->>Studio: Return Card UI (2 Auth Buttons with HMAC-signed state + Category Filter)
+    Admin->>ConfigFn: Button 1: "Authorize Google Workspace Trigger" -> GET /oauthStart?state=<signedState>
     ConfigFn->>Secrets: Read OAUTH_CLIENT_ID & OAUTH_CLIENT_SECRET
     ConfigFn->>DB: GET /oauthCallback -> Verify state & id_token (sub === state.userId), store refreshToken in /studioAuth/{userId}
+    Admin->>WebApp: Button 2: "Sign in as PulseWell Admin" -> GET /?studioState=<signedState>
+    WebApp->>ConfigFn: Authenticate with Firebase Auth & POST /oauthStart { state, firebaseIdToken }
+    ConfigFn->>DB: Verify HMAC state & Firebase ID token, store pulseUid + pulseEmail in /studioAuth/{userId}
     end
 
     rect rgb(240, 253, 244)
-    Note over Admin,DB: Phase 2 — Starter Subscription Lifecycle (Turn Flow On / Off)
+    Note over Admin,DB: Phase 2 — Starter Subscription Lifecycle & Dual-Auth Gatekeeper (Turn Flow On / Off)
     Admin->>Studio: Configure downstream step (e.g. Gmail) & Turn Flow ON
     Studio->>ManageFn: POST /onManageSportsTrigger (workflow.triggerCreation)
-    ManageFn->>DB: Save { triggerId, userId, userEmail, notifyUri, categoryFilter } in /studioTriggers/{triggerId}
+    ManageFn->>DB: Verify /studioAuth/{userId} has both refreshToken & pulseUid
+    ManageFn->>DB: Save { triggerId, userId, userEmail, pulseUid, pulseEmail, notifyUri, categoryFilter } in /studioTriggers/{triggerId}
     ManageFn-->>Studio: 200 OK ({})
     end
 
@@ -57,7 +61,7 @@ sequenceDiagram
     WebApp->>DB: Create /registrations/{registrationId} & increment /offerings/{offeringId}
     DB-->>EventFn: Eventarc document.created trigger
     EventFn->>DB: Query active subscriptions in /studioTriggers matching categoryFilter
-    EventFn->>DB: Read owner's refreshToken from /studioAuth/{userId}
+    EventFn->>DB: Verify pulseUid & read owner's refreshToken from /studioAuth/{userId}
     EventFn->>Secrets: Read OAUTH_CLIENT_ID & OAUTH_CLIENT_SECRET
     EventFn->>Studio: POST https://workspacestudio.googleapis.com/v1/triggers/{triggerId}:fire
     Studio-->>EventFn: 200 OK ({}) — Starts Flow execution (sends confirmation email)
@@ -86,15 +90,17 @@ customstarter/
 │   ├── main.jsx                    # React application entry point
 │   ├── App.jsx                     # Catalog view, real-time Firestore listeners & payload inspector
 │   ├── index.css                   # Custom responsive styling
-│   ├── firebase.js                 # Modular Firebase client SDK initialization (Firestore)
+│   ├── firebase.js                 # Modular Firebase client SDK initialization (Auth & Firestore)
 │   ├── components/
-│   │   └── RegistrationModal.jsx   # Employee sign-up modal for sports offerings
+│   │   ├── AdminLoginModal.jsx     # Firebase Auth sign-in modal for PulseWell admins
+│   │   ├── RegistrationModal.jsx   # Employee sign-up modal for sports offerings
+│   │   └── StudioPulseAuthPopup.jsx # Popup view (?studioState=...) linking PulseWell Admin to Studio
 │   └── data/
 │       └── sportsOfferings.js      # Default sports catalog & client-side payload preview builder
 └── functions/
     ├── package.json                # Backend dependencies (firebase-admin v13, firebase-functions v6, google-auth-library v10)
     ├── index.js                    # 2nd Gen Cloud Functions declarations & runtime metadata
-    ├── studioConfigManage.js       # Card builder, HMAC-signed OAuth 2.0 flow, subscription & fire logic
+    ├── studioConfigManage.js       # Card builder, dual-auth (GWS OAuth + Firebase Auth), subscription & fire logic
     └── starterPayload.js           # Builds FireTriggerRequest payload & UUID v4 requestId
 ```
 
@@ -123,33 +129,41 @@ The starter is registered with Google Workspace Studio as an HTTP Add-on using `
 
 ---
 
-### 4.2 Per-User Offline OAuth 2.0 & Credential Isolation (`functions/studioConfigManage.js`)
-Because registrations occur asynchronously in the future (long after the 1-hour `authorizationEventObject.userOAuthToken` expires), HTTP starters must obtain and store an **offline refresh token** (`access_type=offline`) for each user who configures a trigger. Moreover, Workspace Studio validates that the access token used to call `triggers.fire` belongs to the exact Google user who owns that `triggerId`.
+### 4.2 Two-Sided Authorization: Google Workspace Trigger OAuth + PulseWell Admin Sign-In (`functions/studioConfigManage.js`)
+To ensure that only authorized **PulseWell Admins** can subscribe to Firestore registration updates and that **Google Workspace Studio** receives offline trigger calls from the trigger owner's Google identity, starter configuration uses a **two-button dual-authorization pattern** stored in `/studioAuth/{userId}`:
 
 1. **User Identity Resolution (`resolveEventUserIdentity`)**:
    - Every HTTP call from Workspace Studio to `onConfigSportsTrigger` or `onManageSportsTrigger` carries `authorizationEventObject.userIdToken` and/or `authorizationEventObject.userOAuthToken`.
    - The backend extracts the user's immutable Google `sub` (`userId`) and `userEmail` from `userIdToken` or via `https://www.googleapis.com/oauth2/v2/userinfo`.
-2. **Configuration Card & Signed State (`handleConfigSportsTrigger` & `createSignedOAuthState`)**:
-   - Checks `/studioAuth/{userId}` in Firestore to see if this specific user has already granted an offline `refreshToken`.
-   - Mints a 15-minute **HMAC-SHA256 signed `state` token** (`{ userId, userEmail, exp }`) signed with `OAUTH_CLIENT_SECRET`, and renders a Google Workspace Card containing an **Authorize PulseWell Offline Access** button (`openAs: "OVERLAY"`, `onClose: "RELOAD"`) that links to `/oauthStart?state=<signedState>`.
-3. **Hardened OAuth 2.0 Flow (`handleOAuthStart` & `handleOAuthCallback`)**:
-   - Even though `oauthStart` and `oauthCallback` use `invoker: 'public'`, both endpoints first verify the HMAC signature and expiration of `?state=...` using `verifySignedOAuthState` (rejecting any unauthenticated external caller with `403 Forbidden`).
+2. **Configuration Card with Two Separate Buttons (`handleConfigSportsTrigger` & `createSignedOAuthState`)**:
+   - Checks `/studioAuth/{userId}` in Firestore for both `refreshToken` (Google Workspace OAuth) and `pulseUid` (PulseWell Firebase Auth Admin).
+   - Mints a 15-minute **HMAC-SHA256 signed `state` token** (`{ userId, userEmail, exp }`) signed with `OAUTH_CLIENT_SECRET`, and renders two separate authorization sections on the card:
+     - **Button 1 (`Authorize Google Workspace Trigger`)**: Opens `/oauthStart?state=<signedState>` (`openAs: "OVERLAY"`, `onClose: "RELOAD"`).
+     - **Button 2 (`Sign in as PulseWell Admin`)**: Opens `https://customstarter.web.app/?studioState=<signedState>` (`openAs: "OVERLAY"`, `onClose: "RELOAD"`).
+3. **Side 1 — Hardened Google Workspace OAuth 2.0 Flow (`GET /oauthStart` & `GET /oauthCallback`)**:
+   - Both endpoints verify the HMAC signature and expiration of `?state=...` using `verifySignedOAuthState` (rejecting any unauthenticated external caller with `403 Forbidden`).
    - `handleOAuthStart` uses `google-auth-library` (`OAuth2Client.generateAuthUrl`) to redirect the user to Google's OAuth 2.0 consent screen (`access_type=offline`, `prompt=consent`, `scope="https://www.googleapis.com/auth/workspace.studio.trigger openid email profile"`).
-   - `handleOAuthCallback` exchanges the authorization code via `oauth2Client.getToken(code)`, cryptographically verifies the returned `id_token` (`oauth2Client.verifyIdToken`), and enforces that the consenting Google account (`ticket.getPayload().sub`) strictly matches `verifiedState.userId` before saving the `refreshToken` in `/studioAuth/{userId}`.
+   - `handleOAuthCallback` exchanges the authorization code via `oauth2Client.getToken(code)`, cryptographically verifies the returned `id_token` (`oauth2Client.verifyIdToken`), and enforces that the consenting Google account (`ticket.getPayload().sub`) strictly matches `verifiedState.userId` before saving `refreshToken` in `/studioAuth/{userId}`.
+4. **Side 2 — PulseWell Admin Firebase Auth Link (`StudioPulseAuthPopup.jsx` & `POST /oauthStart`)**:
+   - When the user clicks **Sign in as PulseWell Admin**, `https://customstarter.web.app/?studioState=<signedState>` renders `StudioPulseAuthPopup.jsx`, authenticates the admin via Firebase Auth (`signInWithEmailAndPassword`), and `POST`s `{ state, firebaseIdToken }` to `oauthStart`.
+   - `handlePulseAdminLink` verifies the HMAC-signed `state` token and cryptographically verifies `firebaseIdToken` via `getAuth().verifyIdToken(firebaseIdToken)` (`firebase-admin/auth`, using Google's public SecureToken x509 certificates without requiring extra IAM permissions on the Compute Engine service account), then writes `pulseUid`, `pulseEmail`, and `pulseVerifiedAt` to `/studioAuth/{userId}`.
 
 ---
 
-### 4.3 Starter Subscription Lifecycle (`handleManageSportsTrigger`)
+### 4.3 Starter Subscription Lifecycle & Dual-Auth Gatekeeper (`handleManageSportsTrigger`)
 Google Workspace Studio calls `onManageSportsTrigger` when a flow containing the starter is turned **On** or **Off**:
 
 - **Trigger Creation (`workflow.triggerCreation`)**:
   - Invoked when a user turns their flow **On** in Workspace Studio.
-  - Resolves the invoking user's `userId` and `userEmail` and writes the subscription document to `/studioTriggers/{triggerId}`:
+  - Calls `verifyDualAuthorizationForUser(db, identity.userId)` to verify that `/studioAuth/{userId}` has **both** a Google OAuth `refreshToken` and a verified Firebase Auth `pulseUid`. If either is missing, `handleManageSportsTrigger` returns `403 Forbidden` and refuses to create the subscription.
+  - Once verified, writes the subscription document to `/studioTriggers/{triggerId}` with the full identity mapping:
     ```json
     {
       "triggerId": "...",
       "userId": "109876543210...",
       "userEmail": "casey.chipmunk@jehrl.altostrat.com",
+      "pulseUid": "xYz123FirebaseAdminUid",
+      "pulseEmail": "admin@pulsewell.io",
       "notifyUri": "https://workspacestudio.googleapis.com/v1/triggers/...:fire",
       "inputs": { "categoryFilter": { "stringValues": ["ALL"] } },
       "categoryFilter": "ALL"
@@ -200,10 +214,10 @@ Google Workspace Studio calls `onManageSportsTrigger` when a flow containing the
 
 | Collection | Document ID | Client SDK Access (`firestore.rules`) | Purpose |
 | :--- | :--- | :--- | :--- |
-| `offerings` | `{offeringId}` | Read / Write (`if true` for demo) | Live spot counts (`registeredCount` / `capacity`) for sports offerings. |
-| `registrations` | `{registrationId}` | Read / Write (`if true` for demo) | Employee sign-ups, trigger execution status (`starterStatus`), and payload inspector metadata. |
-| `studioTriggers` | `{triggerId}` | Read / Write (`if true` for demo) | Active Workspace Studio trigger subscriptions (`triggerId`, `userId`, `userEmail`, `notifyUri`, `categoryFilter`). Deleted on `triggerDeletion` or `404`. |
-| `studioAuth` | `{userId}` | **Denied (`if false` by default)** | Per-user OAuth 2.0 `refreshToken` and `accessToken`. Accessible only to Cloud Functions via the Firebase Admin SDK. |
+| `offerings` | `{offeringId}` | Read / Write (`if true`) | Live spot counts (`registeredCount` / `capacity`) for sports offerings. |
+| `registrations` | `{registrationId}` | Create: `if true`<br>Read / Update / Delete: `if request.auth != null` (Admins only) | Employee sign-ups, trigger execution status (`starterStatus`), and payload inspector metadata. |
+| `studioTriggers` | `{triggerId}` | Read / Write: `if request.auth != null` (Admins + Cloud Functions Admin SDK) | Active Workspace Studio trigger subscriptions (`triggerId`, `userId`, `userEmail`, `pulseUid`, `pulseEmail`, `notifyUri`, `categoryFilter`). Deleted on `triggerDeletion` or `404`. |
+| `studioAuth` | `{userId}` | **Denied (`if false` by default)** | Per-user Google Workspace OAuth 2.0 credentials (`refreshToken`, `accessToken`, `connectedEmail`) and linked PulseWell Admin identity (`pulseUid`, `pulseEmail`, `pulseVerifiedAt`). Accessible only to Cloud Functions via the Firebase Admin SDK. |
 
 ---
 
@@ -248,7 +262,13 @@ npm install
 npm --prefix functions install
 ```
 
-### 6.3 Configure OAuth 2.0 Credentials & Secret Manager
+### 6.3 Configure Firebase Authentication (PulseWell Admins)
+1. Open the **Firebase Console** (`Authentication > Sign-in method`) and enable the **Email/Password** provider.
+2. In `Authentication > Users`, click **Add user** to create one or more PulseWell Admin accounts.
+   - Normal course participants do not need an account to sign up for sports offerings.
+   - Admin accounts are used both to inspect live `/registrations` in the web app (`Admin Sign In`) and to authorize Google Workspace Studio trigger subscriptions (`Sign in as PulseWell Admin`).
+
+### 6.4 Configure OAuth 2.0 Credentials & Secret Manager
 1. In the **Google Cloud Console** (`APIs & Services > Credentials`), create an **OAuth 2.0 Client ID** of type **Web application**.
 2. Add the `oauthCallback` Cloud Function URL to **Authorized redirect URIs**:
    ```text
@@ -260,7 +280,7 @@ npm --prefix functions install
    firebase functions:secrets:set OAUTH_CLIENT_SECRET
    ```
 
-### 6.4 Build & Deploy Firestore, Cloud Functions, and Hosting
+### 6.5 Build & Deploy Firestore, Cloud Functions, and Hosting
 Build the frontend bundle and deploy Firestore rules/indexes, all 5 Cloud Functions, and Firebase Hosting:
 ```bash
 # 1. Build the React + Vite frontend
@@ -275,7 +295,7 @@ firebase deploy --only firestore,hosting,functions:onConfigSportsTrigger,functio
 ```
 > **Note:** Invoker permissions (`invoker: ADDON_SERVICE_ACCOUNT` for `onConfigSportsTrigger` and `onManageSportsTrigger`; `invoker: 'public'` for the browser OAuth endpoints `oauthStart` and `oauthCallback`), region (`europe-west1`), and Secret Manager bindings (`secrets`) are declared directly in the function options inside `functions/index.js` and applied automatically by `firebase deploy`.
 
-### 6.5 Create & Install the Google Workspace Add-on Deployment (First-Time Setup)
+### 6.6 Create & Install the Google Workspace Add-on Deployment (First-Time Setup)
 Once the Cloud Functions are live, register and install the HTTP Add-on deployment so the **New Sports Registration** starter appears in Google Workspace Studio:
 ```bash
 # 1. Create the initial Add-on deployment from deployment.json
@@ -289,7 +309,7 @@ gcloud workspace-add-ons deployments install pulsewell-starter \
 ```
 > **Tip:** Make sure `gcloud` is authenticated as the Google Workspace user account you use to open [Google Workspace Studio](https://studio.workspace.google.com), as `deployments install` installs the developer add-on for the active `gcloud` identity.
 
-### 6.6 Updating an Existing Deployment
+### 6.7 Updating an Existing Deployment
 When making changes after the initial deployment:
 ```bash
 # Update the Add-on manifest (if deployment.json changed)

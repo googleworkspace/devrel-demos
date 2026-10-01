@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import { getAuth } from 'firebase-admin/auth'
 import { FieldValue } from 'firebase-admin/firestore'
 import * as logger from 'firebase-functions/logger'
 import { defineSecret } from 'firebase-functions/params'
@@ -10,6 +11,7 @@ export const oauthClientSecret = defineSecret('OAUTH_CLIENT_SECRET')
 
 const STUDIO_TRIGGER_SCOPE = 'https://www.googleapis.com/auth/workspace.studio.trigger'
 const DEFAULT_FUNCTION_BASE_URL = 'https://europe-west1-customstarter.cloudfunctions.net'
+const DEFAULT_WEB_APP_URL = 'https://customstarter.web.app'
 const OAUTH_STATE_TTL_MS = 15 * 60 * 1000 // 15 minutes
 
 /**
@@ -212,16 +214,33 @@ async function captureEventOAuthTokenIfPresent(db, body) {
 
 /**
  * Builds the Google Workspace Add-on configuration card (`RenderActions` JSON)
- * returned by `onConfigSportsTrigger`.
+ * returned by `onConfigSportsTrigger` with two separate authorization buttons:
+ * 1) Google Workspace Studio Trigger Permission (OAuth 2.0 `workspace.studio.trigger`)
+ * 2) PulseWell Admin Authentication (Firebase Auth)
  */
-function buildStarterConfigurationCard({ isOfflineAuthorized, connectedEmail, oauthStartUrl }) {
-  const connectionStatusText = isOfflineAuthorized
-    ? `<b>Status:</b> Connected (${connectedEmail || 'Offline Refresh Token stored'})`
-    : '<b>Status:</b> Offline OAuth 2.0 refresh token not yet authorized for your account. Click below to grant offline access for asynchronous <code>triggers.fire</code> calls.'
+function buildStarterConfigurationCard({
+  isOfflineAuthorized,
+  connectedEmail,
+  oauthStartUrl,
+  isPulseAuthorized,
+  pulseEmail,
+  pulseAuthUrl,
+}) {
+  const gwsStatusText = isOfflineAuthorized
+    ? `<b>Status:</b> Connected (<code>${connectedEmail || 'Offline Refresh Token stored'}</code>)`
+    : '<b>Status:</b> Offline OAuth 2.0 refresh token not yet authorized for your Google Workspace account. Click below to grant offline access for asynchronous <code>triggers.fire</code> calls.'
 
-  const authButtonText = isOfflineAuthorized
-    ? 'Re-authorize Offline Access'
-    : 'Authorize PulseWell Offline Access'
+  const gwsButtonText = isOfflineAuthorized
+    ? 'Re-authorize Google Workspace Trigger'
+    : 'Authorize Google Workspace Trigger'
+
+  const pulseStatusText = isPulseAuthorized
+    ? `<b>Status:</b> Verified PulseWell Admin (<code>${pulseEmail || 'Authenticated'}</code>)`
+    : '<b>Status:</b> Not signed in to PulseWell. Only authenticated PulseWell Admins are allowed to subscribe to Firestore registration updates.'
+
+  const pulseButtonText = isPulseAuthorized
+    ? 'Switch PulseWell Admin Account'
+    : 'Sign in as PulseWell Admin'
 
   return {
     action: {
@@ -234,18 +253,18 @@ function buildStarterConfigurationCard({ isOfflineAuthorized, connectedEmail, oa
             },
             sections: [
               {
-                header: '1. Account & Offline Trigger Authorization',
+                header: '1. Google Workspace Trigger Permission (OAuth 2.0)',
                 widgets: [
                   {
                     textParagraph: {
-                      text: connectionStatusText,
+                      text: gwsStatusText,
                     },
                   },
                   {
                     buttonList: {
                       buttons: [
                         {
-                          text: authButtonText,
+                          text: gwsButtonText,
                           onClick: {
                             openLink: {
                               url: oauthStartUrl,
@@ -260,7 +279,33 @@ function buildStarterConfigurationCard({ isOfflineAuthorized, connectedEmail, oa
                 ],
               },
               {
-                header: '2. Registration Filter',
+                header: '2. PulseWell Admin Authentication (Firebase Auth)',
+                widgets: [
+                  {
+                    textParagraph: {
+                      text: pulseStatusText,
+                    },
+                  },
+                  {
+                    buttonList: {
+                      buttons: [
+                        {
+                          text: pulseButtonText,
+                          onClick: {
+                            openLink: {
+                              url: pulseAuthUrl,
+                              onClose: 'RELOAD',
+                              openAs: 'OVERLAY',
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+              {
+                header: '3. Registration Filter',
                 widgets: [
                   {
                     selectionInput: {
@@ -301,7 +346,9 @@ function buildStarterConfigurationCard({ isOfflineAuthorized, connectedEmail, oa
 
 /**
  * Handler for `onConfigSportsTrigger` (HTTP POST from Google Workspace Studio).
- * Displays the configuration card and checks whether offline OAuth credentials
+ * Displays the configuration card and checks whether both:
+ * 1) Google Workspace offline OAuth credentials (`refreshToken`) and
+ * 2) PulseWell Admin Firebase Auth credentials (`pulseUid`)
  * are stored in Firestore for the invoking user (`/studioAuth/{userId}`).
  */
 export async function handleConfigSportsTrigger(req, res, db) {
@@ -334,16 +381,18 @@ export async function handleConfigSportsTrigger(req, res, db) {
           !legacyData.connectedEmail ||
           legacyData.connectedEmail.toLowerCase() === identity.userEmail
         ) {
-          authData = legacyData
+          authData = { ...legacyData, ...authData }
         }
       }
     }
 
     const isOfflineAuthorized = Boolean(authData?.refreshToken)
+    const isPulseAuthorized = Boolean(authData?.pulseUid)
 
     const config = getOAuthClientConfig(req)
     const baseUrl = getFunctionBaseUrl(req)
-    const startUrlObj = new URL(`${baseUrl}/oauthStart`)
+    const webAppUrl = (process.env.WEB_APP_URL || DEFAULT_WEB_APP_URL).replace(/\/$/, '')
+
     const signedState = createSignedOAuthState(
       {
         userId: identity.userId,
@@ -351,12 +400,44 @@ export async function handleConfigSportsTrigger(req, res, db) {
       },
       config.clientSecret
     )
+
+    const startUrlObj = new URL(`${baseUrl}/oauthStart`)
     startUrlObj.searchParams.set('state', signedState)
     const oauthStartUrl = startUrlObj.toString()
 
+    const pulseUrlObj = new URL(`${webAppUrl}/`)
+    pulseUrlObj.searchParams.set('studioState', signedState)
+    const pulseAuthUrl = pulseUrlObj.toString()
+
     // If explicitly requested via query param (?requireAuthPrompt=true) and not authorized yet,
     // return a standalone custom_authorization_prompt card as shown in connect-third-party-service.
-    if (req.query.requireAuthPrompt === 'true' && !isOfflineAuthorized) {
+    if (req.query.requireAuthPrompt === 'true' && (!isOfflineAuthorized || !isPulseAuthorized)) {
+      const buttons = []
+      if (!isOfflineAuthorized) {
+        buttons.push({
+          text: '1. Authorize Google Workspace Trigger',
+          onClick: {
+            openLink: {
+              url: oauthStartUrl,
+              onClose: 'RELOAD',
+              openAs: 'OVERLAY',
+            },
+          },
+        })
+      }
+      if (!isPulseAuthorized) {
+        buttons.push({
+          text: '2. Sign in as PulseWell Admin',
+          onClick: {
+            openLink: {
+              url: pulseAuthUrl,
+              onClose: 'RELOAD',
+              openAs: 'OVERLAY',
+            },
+          },
+        })
+      }
+
       res.status(200).json({
         custom_authorization_prompt: {
           action: {
@@ -368,23 +449,12 @@ export async function handleConfigSportsTrigger(req, res, db) {
                       widgets: [
                         {
                           textParagraph: {
-                            text: 'PulseWell needs offline permission to notify Google Workspace Studio when a new sports registration occurs.',
+                            text: 'PulseWell requires both Google Workspace Trigger OAuth permission and a verified PulseWell Admin sign-in to subscribe to sports registrations.',
                           },
                         },
                         {
                           buttonList: {
-                            buttons: [
-                              {
-                                text: 'Sign in & Authorize',
-                                onClick: {
-                                  openLink: {
-                                    url: oauthStartUrl,
-                                    onClose: 'RELOAD',
-                                    openAs: 'OVERLAY',
-                                  },
-                                },
-                              },
-                            ],
+                            buttons,
                           },
                         },
                       ],
@@ -403,6 +473,9 @@ export async function handleConfigSportsTrigger(req, res, db) {
       isOfflineAuthorized,
       connectedEmail: authData?.connectedEmail || identity.userEmail || null,
       oauthStartUrl,
+      isPulseAuthorized,
+      pulseEmail: authData?.pulseEmail || null,
+      pulseAuthUrl,
     })
 
     res.status(200).json(cardResponse)
@@ -416,8 +489,57 @@ export async function handleConfigSportsTrigger(req, res, db) {
 }
 
 /**
+ * Verifies that the Google Workspace user (`userId`) has completed both:
+ * 1) Google Workspace Trigger OAuth (`refreshToken` in `/studioAuth/{userId}`)
+ * 2) PulseWell Admin Firebase Auth (`pulseUid` in `/studioAuth/{userId}`, active in Firebase Auth)
+ */
+async function verifyDualAuthorizationForUser(db, userId) {
+  if (!userId) {
+    return {
+      authorized: false,
+      reason: 'Missing Google Workspace userId in request.',
+      authData: null,
+    }
+  }
+
+  const userAuthDoc = await db.collection('studioAuth').doc(String(userId)).get()
+  if (!userAuthDoc.exists) {
+    return {
+      authorized: false,
+      reason: 'No authorization record found in /studioAuth/{userId}.',
+      authData: null,
+    }
+  }
+
+  const authData = userAuthDoc.data()
+  if (!authData?.refreshToken) {
+    return {
+      authorized: false,
+      reason: 'Google Workspace Trigger OAuth refresh token is missing.',
+      authData,
+    }
+  }
+
+  if (!authData?.pulseUid) {
+    return {
+      authorized: false,
+      reason: 'PulseWell Admin Firebase Auth account is not linked.',
+      authData,
+    }
+  }
+
+  return {
+    authorized: true,
+    reason: null,
+    authData,
+  }
+}
+
+/**
  * Handler for `onManageSportsTrigger` (HTTP POST from Google Workspace Studio).
  * Manages the subscription lifecycle (`triggerCreation` and `triggerDeletion`).
+ * Enforces that the user has completed both Google Workspace OAuth and PulseWell Admin
+ * sign-in before creating a subscription in `/studioTriggers/{triggerId}`.
  */
 export async function handleManageSportsTrigger(req, res, db) {
   try {
@@ -443,6 +565,21 @@ export async function handleManageSportsTrigger(req, res, db) {
         return
       }
 
+      const authCheck = await verifyDualAuthorizationForUser(db, identity.userId)
+      if (!authCheck.authorized) {
+        logger.warn('Rejected triggerCreation: user has not completed dual authorization', {
+          triggerId,
+          userId: identity.userId,
+          userEmail: identity.userEmail,
+          reason: authCheck.reason,
+        })
+        res.status(403).json({
+          error: 'Unauthorized to subscribe to PulseWell registration triggers',
+          message: `${authCheck.reason} Please open the starter configuration card in Google Workspace Studio and complete both authorization steps.`,
+        })
+        return
+      }
+
       const notifyUri =
         triggerCreation.notifyUri ||
         `https://workspacestudio.googleapis.com/v1/triggers/${triggerId}:fire`
@@ -455,8 +592,10 @@ export async function handleManageSportsTrigger(req, res, db) {
         .set(
           {
             triggerId,
-            userId: identity.userId || null,
-            userEmail: identity.userEmail || null,
+            userId: identity.userId,
+            userEmail: identity.userEmail || authCheck.authData.connectedEmail || null,
+            pulseUid: authCheck.authData.pulseUid,
+            pulseEmail: authCheck.authData.pulseEmail || null,
             notifyUri,
             inputs,
             categoryFilter,
@@ -470,6 +609,8 @@ export async function handleManageSportsTrigger(req, res, db) {
         triggerId,
         userId: identity.userId,
         userEmail: identity.userEmail,
+        pulseUid: authCheck.authData.pulseUid,
+        pulseEmail: authCheck.authData.pulseEmail,
         notifyUri,
         categoryFilter,
       })
@@ -511,13 +652,131 @@ export async function handleManageSportsTrigger(req, res, db) {
 }
 
 /**
- * Handler for `oauthStart` (HTTP GET).
- * Verifies the HMAC-signed `state` token minted by `onConfigSportsTrigger` and initiates
- * the OAuth 2.0 offline consent screen for `workspace.studio.trigger`.
+ * Sets CORS headers on `oauthStart` so the PulseWell web app (`https://customstarter.web.app`)
+ * can POST the signed `state` token and Firebase Auth `idToken` to link the admin account.
  */
-export async function handleOAuthStart(req, res) {
+function setCorsHeaders(req, res) {
+  const origin = req.get('origin') || '*'
+  res.set('Access-Control-Allow-Origin', origin)
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+}
+
+/**
+ * Handles `POST /oauthStart` from the PulseWell Web App popup (`StudioPulseAuthPopup.jsx`).
+ * Verifies the HMAC-signed `state` token (containing the Google Workspace `userId`) and
+ * cryptographically verifies the Firebase Auth `firebaseIdToken` using `firebase-admin/auth`,
+ * then stores `pulseUid` and `pulseEmail` in `/studioAuth/{userId}`.
+ */
+async function handlePulseAdminLink(req, res, db, config) {
+  const { state, firebaseIdToken } = req.body || {}
+  if (!state || !firebaseIdToken) {
+    res.status(400).json({
+      error: 'Missing required fields: state and firebaseIdToken.',
+    })
+    return
+  }
+
+  const verifiedState = verifySignedOAuthState(String(state), config.clientSecret)
+  if (!verifiedState) {
+    logger.warn('Rejected PulseWell Admin link request with invalid or expired signed state')
+    res.status(403).json({
+      error:
+        'Invalid or expired Studio authorization state. Please reopen the sign-in window from the Google Workspace Studio starter card.',
+    })
+    return
+  }
+
+  let decodedFirebaseToken
   try {
+    decodedFirebaseToken = await getAuth().verifyIdToken(String(firebaseIdToken))
+  } catch (err) {
+    logger.warn('Rejected PulseWell Admin link request: invalid Firebase ID token', {
+      error: err.message,
+    })
+    res.status(401).json({
+      error: `Invalid PulseWell Firebase Auth token: ${err.message}`,
+    })
+    return
+  }
+
+  const pulseUid = decodedFirebaseToken.uid
+  const pulseEmail = decodedFirebaseToken.email
+    ? String(decodedFirebaseToken.email).trim().toLowerCase()
+    : null
+  const gwsUserId = String(verifiedState.userId).trim()
+  const gwsEmail = verifiedState.userEmail || null
+
+  const updatePayload = {
+    userId: gwsUserId,
+    pulseUid,
+    pulseEmail,
+    pulseVerifiedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  }
+  if (gwsEmail) {
+    updatePayload.connectedEmail = gwsEmail
+  }
+
+  await db.collection('studioAuth').doc(gwsUserId).set(updatePayload, { merge: true })
+
+  // Backfill pulseUid and pulseEmail onto any existing trigger subscriptions owned by this GWS user
+  const triggersByUserSnap = await db
+    .collection('studioTriggers')
+    .where('userId', '==', gwsUserId)
+    .get()
+  for (const trigDoc of triggersByUserSnap.docs) {
+    await trigDoc.ref.set(
+      {
+        pulseUid,
+        pulseEmail,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+  }
+
+  logger.info('Successfully linked PulseWell Admin account to Google Workspace Studio user', {
+    userId: gwsUserId,
+    gwsEmail,
+    pulseUid,
+    pulseEmail,
+  })
+
+  res.status(200).json({
+    ok: true,
+    userId: gwsUserId,
+    gwsEmail,
+    pulseUid,
+    pulseEmail,
+  })
+}
+
+/**
+ * Handler for `oauthStart`:
+ * - `GET`: Verifies the HMAC-signed `state` token minted by `onConfigSportsTrigger` and initiates
+ *   the Google OAuth 2.0 offline consent screen for `workspace.studio.trigger`.
+ * - `POST`: Verifies the HMAC-signed `state` token and a Firebase Auth ID token to link the
+ *   invoking Google Workspace user (`userId`) with their PulseWell Admin account (`pulseUid`).
+ */
+export async function handleOAuthStart(req, res, db) {
+  try {
+    setCorsHeaders(req, res)
+    if (req.method === 'OPTIONS') {
+      res.status(204).send('')
+      return
+    }
+
     const config = getOAuthClientConfig(req)
+
+    if (req.method === 'POST') {
+      if (!config.clientSecret) {
+        res.status(500).json({ error: 'OAUTH_CLIENT_SECRET is not configured in Secret Manager.' })
+        return
+      }
+      await handlePulseAdminLink(req, res, db, config)
+      return
+    }
 
     if (!config.clientId || !config.clientSecret) {
       res.status(200).send(`<!doctype html>
@@ -557,6 +816,14 @@ firebase functions:secrets:set OAUTH_CLIENT_SECRET</pre>
         .send(
           'Error: Invalid or expired authorization state. Please initiate authorization from the starter configuration card inside Google Workspace Studio.'
         )
+      return
+    }
+
+    if (req.query.mode === 'pulse') {
+      const webAppUrl = (process.env.WEB_APP_URL || DEFAULT_WEB_APP_URL).replace(/\/$/, '')
+      const pulseUrlObj = new URL(`${webAppUrl}/`)
+      pulseUrlObj.searchParams.set('studioState', rawState)
+      res.redirect(pulseUrlObj.toString())
       return
     }
 
@@ -785,6 +1052,15 @@ export async function getValidStudioAccessToken(db, userId = null, userEmail = n
   }
 
   const authData = authSnap.data()
+
+  if (!authData.pulseUid) {
+    logger.warn('Refusing to issue Studio access token: trigger owner has no linked PulseWell Admin account', {
+      userId: userId || authDocRef.id,
+      userEmail,
+    })
+    return null
+  }
+
   const config = getOAuthClientConfig()
 
   if (authData.refreshToken && config.clientId && config.clientSecret) {

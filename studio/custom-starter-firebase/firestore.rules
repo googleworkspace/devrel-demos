@@ -2,15 +2,21 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow reading and creating sports offerings & registrations for the demo
+    // Course offerings are publicly readable and updated when a participant signs up
     match /offerings/{offeringId} {
       allow read, write: if true;
     }
+
+    // Course participants can create registrations without an account;
+    // only authenticated Firebase Auth admins can read or manage registrations
     match /registrations/{registrationId} {
-      allow read, write: if true;
+      allow create: if true;
+      allow read, update, delete: if request.auth != null;
     }
+
+    // Trigger subscriptions are managed by Cloud Functions (Admin SDK) and readable by signed-in admins
     match /studioTriggers/{triggerId} {
-      allow read, write: if true;
+      allow read, write: if request.auth != null;
     }
   }
 }

@@ -369,6 +369,10 @@ pre {
   padding-bottom: 64px;
 }
 
+.workspace-layout--single {
+  grid-template-columns: 1fr;
+}
+
 .offerings-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));

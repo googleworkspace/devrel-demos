@@ -1,6 +1,8 @@
+import { createHmac, timingSafeEqual } from 'node:crypto'
 import { FieldValue } from 'firebase-admin/firestore'
 import * as logger from 'firebase-functions/logger'
 import { defineSecret } from 'firebase-functions/params'
+import { OAuth2Client } from 'google-auth-library'
 import { buildStudioTriggerPayload } from './starterPayload.js'
 
 export const oauthClientId = defineSecret('OAUTH_CLIENT_ID')
@@ -8,6 +10,7 @@ export const oauthClientSecret = defineSecret('OAUTH_CLIENT_SECRET')
 
 const STUDIO_TRIGGER_SCOPE = 'https://www.googleapis.com/auth/workspace.studio.trigger'
 const DEFAULT_FUNCTION_BASE_URL = 'https://europe-west1-customstarter.cloudfunctions.net'
+const OAUTH_STATE_TTL_MS = 15 * 60 * 1000 // 15 minutes
 
 /**
  * Helper to resolve the base URL for HTTP Cloud Functions in this project.
@@ -39,6 +42,78 @@ export function getOAuthClientConfig(req) {
     clientId: clientId ? clientId.trim() : null,
     clientSecret: clientSecret ? clientSecret.trim() : null,
     redirectUri: process.env.OAUTH_REDIRECT_URI || defaultRedirectUri,
+  }
+}
+
+/**
+ * Creates a Google `OAuth2Client` instance configured with the app's Web Client credentials.
+ */
+function createOAuth2Client(config) {
+  return new OAuth2Client(config.clientId, config.clientSecret, config.redirectUri)
+}
+
+/**
+ * Creates an HMAC-SHA256 signed OAuth `state` token containing the invoking
+ * Google Workspace user's `userId` (`sub`), `userEmail`, and expiration timestamp.
+ */
+function createSignedOAuthState({ userId, userEmail }, clientSecret) {
+  const payloadB64 = Buffer.from(
+    JSON.stringify({
+      userId: userId ? String(userId).trim() : null,
+      userEmail: userEmail ? String(userEmail).trim().toLowerCase() : null,
+      exp: Date.now() + OAUTH_STATE_TTL_MS,
+    })
+  ).toString('base64url')
+
+  if (!clientSecret) {
+    return payloadB64
+  }
+
+  const signatureB64 = createHmac('sha256', clientSecret)
+    .update(payloadB64)
+    .digest('base64url')
+
+  return `${payloadB64}.${signatureB64}`
+}
+
+/**
+ * Verifies an HMAC-SHA256 signed OAuth `state` token and returns the decoded payload
+ * if the signature is valid, the token has not expired, and `userId` is present.
+ */
+function verifySignedOAuthState(stateToken, clientSecret) {
+  if (!stateToken || typeof stateToken !== 'string' || !clientSecret) {
+    return null
+  }
+
+  const parts = stateToken.split('.')
+  if (parts.length !== 2) {
+    return null
+  }
+
+  const [payloadB64, signatureB64] = parts
+  const expectedSig = createHmac('sha256', clientSecret).update(payloadB64).digest()
+  let actualSig
+  try {
+    actualSig = Buffer.from(signatureB64, 'base64url')
+  } catch {
+    return null
+  }
+
+  if (expectedSig.length !== actualSig.length || !timingSafeEqual(expectedSig, actualSig)) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'))
+    if (!parsed || !parsed.userId) {
+      return null
+    }
+    if (typeof parsed.exp === 'number' && Date.now() > parsed.exp) {
+      return null
+    }
+    return parsed
+  } catch {
+    return null
   }
 }
 
@@ -266,14 +341,17 @@ export async function handleConfigSportsTrigger(req, res, db) {
 
     const isOfflineAuthorized = Boolean(authData?.refreshToken)
 
+    const config = getOAuthClientConfig(req)
     const baseUrl = getFunctionBaseUrl(req)
     const startUrlObj = new URL(`${baseUrl}/oauthStart`)
-    if (identity.userId) {
-      startUrlObj.searchParams.set('userId', identity.userId)
-    }
-    if (identity.userEmail) {
-      startUrlObj.searchParams.set('userEmail', identity.userEmail)
-    }
+    const signedState = createSignedOAuthState(
+      {
+        userId: identity.userId,
+        userEmail: identity.userEmail,
+      },
+      config.clientSecret
+    )
+    startUrlObj.searchParams.set('state', signedState)
     const oauthStartUrl = startUrlObj.toString()
 
     // If explicitly requested via query param (?requireAuthPrompt=true) and not authorized yet,
@@ -434,15 +512,14 @@ export async function handleManageSportsTrigger(req, res, db) {
 
 /**
  * Handler for `oauthStart` (HTTP GET).
- * Initiates the OAuth 2.0 offline consent screen for `workspace.studio.trigger`
- * using `OAUTH_CLIENT_ID` from Google Cloud Secret Manager, forwarding the
- * invoking user's `userId` in the OAuth `state` parameter.
+ * Verifies the HMAC-signed `state` token minted by `onConfigSportsTrigger` and initiates
+ * the OAuth 2.0 offline consent screen for `workspace.studio.trigger`.
  */
 export async function handleOAuthStart(req, res) {
   try {
     const config = getOAuthClientConfig(req)
 
-    if (!config.clientId) {
+    if (!config.clientId || !config.clientSecret) {
       res.status(200).send(`<!doctype html>
 <html lang="en">
 <head>
@@ -471,25 +548,28 @@ firebase functions:secrets:set OAUTH_CLIENT_SECRET</pre>
       return
     }
 
-    const userId = req.query.userId ? String(req.query.userId).trim() : null
-    const userEmail = req.query.userEmail ? String(req.query.userEmail).trim().toLowerCase() : null
-    const statePayload = Buffer.from(
-      JSON.stringify({ userId, userEmail })
-    ).toString('base64url')
-
-    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
-    authUrl.searchParams.set('client_id', config.clientId)
-    authUrl.searchParams.set('redirect_uri', config.redirectUri)
-    authUrl.searchParams.set('response_type', 'code')
-    authUrl.searchParams.set('scope', `${STUDIO_TRIGGER_SCOPE} openid email profile`)
-    authUrl.searchParams.set('access_type', 'offline')
-    authUrl.searchParams.set('prompt', 'consent')
-    authUrl.searchParams.set('state', statePayload)
-    if (userEmail) {
-      authUrl.searchParams.set('login_hint', userEmail)
+    const rawState = req.query.state ? String(req.query.state) : ''
+    const verifiedState = verifySignedOAuthState(rawState, config.clientSecret)
+    if (!verifiedState) {
+      logger.warn('Rejected oauthStart request with missing, invalid, or expired signed state')
+      res
+        .status(403)
+        .send(
+          'Error: Invalid or expired authorization state. Please initiate authorization from the starter configuration card inside Google Workspace Studio.'
+        )
+      return
     }
 
-    res.redirect(authUrl.toString())
+    const oauth2Client = createOAuth2Client(config)
+    const authorizeUrl = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: [STUDIO_TRIGGER_SCOPE, 'openid', 'email', 'profile'].join(' '),
+      prompt: 'consent',
+      state: rawState,
+      ...(verifiedState.userEmail ? { login_hint: verifiedState.userEmail } : {}),
+    })
+
+    res.redirect(authorizeUrl)
   } catch (error) {
     logger.error('Error in oauthStart', error)
     res.status(500).send(`OAuth initialization error: ${error.message}`)
@@ -498,15 +578,17 @@ firebase functions:secrets:set OAUTH_CLIENT_SECRET</pre>
 
 /**
  * Handler for `oauthCallback` (HTTP GET).
- * Exchanges the OAuth 2.0 authorization code for an access token and offline refresh token,
- * resolves the user's Google `userId` (`sub`), stores the credentials in `/studioAuth/{userId}`,
- * and closes the overlay window.
+ * Verifies the HMAC-signed `state` token, exchanges the OAuth 2.0 authorization code for
+ * credentials, cryptographically verifies `id_token` via `OAuth2Client.verifyIdToken`,
+ * validates that the consenting user matches the Workspace Studio user in `state`,
+ * stores the credentials in `/studioAuth/{userId}`, and closes the overlay window.
  */
 export async function handleOAuthCallback(req, res, db) {
   try {
     const { code, state, error: oauthError } = req.query
     if (oauthError) {
-      res.status(400).send(`OAuth error returned by Google: ${oauthError}`)
+      logger.warn('OAuth error returned by Google', { oauthError })
+      res.status(400).send(`Error: ${oauthError}`)
       return
     }
     if (!code) {
@@ -514,104 +596,112 @@ export async function handleOAuthCallback(req, res, db) {
       return
     }
 
-    let stateUserId = null
-    let stateUserEmail = null
-    if (state) {
-      try {
-        const parsed = JSON.parse(Buffer.from(String(state), 'base64url').toString('utf8'))
-        stateUserId = parsed.userId || null
-        stateUserEmail = parsed.userEmail || null
-      } catch {
-        // Ignore malformed state
-      }
-    }
-
     const config = getOAuthClientConfig(req)
     if (!config.clientId || !config.clientSecret) {
-      res.status(400).send('OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET are not configured in Secret Manager.')
+      res
+        .status(400)
+        .send('OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET are not configured in Secret Manager.')
       return
     }
 
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        code: String(code),
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        redirect_uri: config.redirectUri,
-        grant_type: 'authorization_code',
-      }),
+    const rawState = state ? String(state) : ''
+    const verifiedState = verifySignedOAuthState(rawState, config.clientSecret)
+    if (!verifiedState) {
+      logger.warn('Rejected oauthCallback request with invalid or expired signed state')
+      res
+        .status(403)
+        .send(
+          'Error: Invalid or expired request state. Please start the configuration again from Google Workspace Studio.'
+        )
+      return
+    }
+
+    // Exchange authorization code for access, refresh, and ID tokens
+    const oauth2Client = createOAuth2Client(config)
+    const { tokens } = await oauth2Client.getToken(String(code))
+
+    if (!tokens.id_token) {
+      logger.error('OAuth token response did not include an id_token')
+      res.status(400).send('Error: Missing id_token in OAuth response.')
+      return
+    }
+
+    // Cryptographically verify the Google ID token signature, expiration, and audience
+    const ticket = await oauth2Client.verifyIdToken({
+      idToken: tokens.id_token,
+      audience: config.clientId,
     })
+    const tokenPayload = ticket.getPayload()
+    const userId = tokenPayload?.sub ? String(tokenPayload.sub).trim() : null
+    const connectedEmail = tokenPayload?.email
+      ? String(tokenPayload.email).trim().toLowerCase()
+      : verifiedState.userEmail || null
 
-    const tokenData = await tokenResponse.json()
-    if (!tokenResponse.ok) {
-      logger.error('Failed to exchange authorization code for tokens', tokenData)
-      res.status(400).send(`Token exchange failed: ${JSON.stringify(tokenData)}`)
+    // Validate that the user who granted consent is the same user who initiated the request in Studio
+    if (!userId || userId !== String(verifiedState.userId)) {
+      logger.warn('OAuth token user does not match Workspace Studio request user', {
+        tokenUserId: userId,
+        tokenEmail: connectedEmail,
+        stateUserId: verifiedState.userId,
+        stateEmail: verifiedState.userEmail,
+      })
+      res.status(403).send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Account Mismatch — PulseWell Authorization</title>
+  <style>
+    body { font-family: Google Sans, Roboto, sans-serif; background: #fef2f2; color: #7f1d1d; display: flex; align-items: center; justify-content: center; min-height: 90vh; margin: 0; }
+    .box { background: #fff; border: 1px solid #fecaca; border-radius: 12px; padding: 28px; max-width: 460px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+    h2 { margin-top: 0; color: #b91c1c; }
+    p { font-size: 14px; color: #334155; line-height: 1.5; }
+    button { margin-top: 12px; background: #dc2626; color: white; border: none; border-radius: 6px; padding: 10px 18px; font-weight: 600; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Account Mismatch</h2>
+    <p>The user who granted consent${connectedEmail ? ` (<b>${connectedEmail}</b>)` : ''} does not correspond to the user who initiated the request in Google Workspace Studio${verifiedState.userEmail ? ` (<b>${verifiedState.userEmail}</b>)` : ''}.</p>
+    <p>Please close this window, start the configuration again, and select the same account you are using in Google Workspace Studio.</p>
+    <button onclick="window.close()">Close Window</button>
+  </div>
+</body>
+</html>`)
       return
     }
 
-    let resolvedUserId = null
-    let connectedEmail = null
-
-    // 1. Check id_token returned from Google token endpoint
-    const idTokenClaims = decodeJwtPayload(tokenData.id_token)
-    if (idTokenClaims) {
-      resolvedUserId = idTokenClaims.sub || null
-      connectedEmail = idTokenClaims.email ? String(idTokenClaims.email).toLowerCase() : null
-    }
-
-    // 2. Fetch userinfo endpoint if needed
-    if ((!resolvedUserId || !connectedEmail) && tokenData.access_token) {
-      try {
-        const userResp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-          headers: { Authorization: `Bearer ${tokenData.access_token}` },
-        })
-        if (userResp.ok) {
-          const userInfo = await userResp.json()
-          resolvedUserId = resolvedUserId || userInfo.id || null
-          connectedEmail =
-            connectedEmail || (userInfo.email ? String(userInfo.email).toLowerCase() : null)
-        }
-      } catch (err) {
-        logger.warn('Could not fetch userinfo during OAuth callback', err)
-      }
-    }
-
-    const targetUserId = resolvedUserId || stateUserId || connectedEmail || 'default'
-    const targetUserEmail = connectedEmail || stateUserEmail || null
+    const expiresIn = tokens.expiry_date
+      ? Math.max(1, Math.round((tokens.expiry_date - Date.now()) / 1000))
+      : 3600
 
     const updatePayload = {
-      userId: targetUserId,
-      accessToken: tokenData.access_token,
-      scope: tokenData.scope || STUDIO_TRIGGER_SCOPE,
-      tokenType: tokenData.token_type || 'Bearer',
-      expiresIn: tokenData.expires_in || 3600,
-      connectedEmail: targetUserEmail,
+      userId,
+      accessToken: tokens.access_token,
+      scope: tokens.scope || STUDIO_TRIGGER_SCOPE,
+      tokenType: tokens.token_type || 'Bearer',
+      expiresIn,
+      connectedEmail,
       updatedAt: FieldValue.serverTimestamp(),
     }
 
-    if (tokenData.refresh_token) {
-      updatePayload.refreshToken = tokenData.refresh_token
+    if (tokens.refresh_token) {
+      updatePayload.refreshToken = tokens.refresh_token
     }
 
-    await db.collection('studioAuth').doc(String(targetUserId)).set(updatePayload, { merge: true })
+    await db.collection('studioAuth').doc(userId).set(updatePayload, { merge: true })
 
-    // Backfill userId onto any existing trigger subscriptions that were created by this user
-    // before per-user credential linking was added
+    // Backfill userId onto any existing trigger subscriptions created by this user
     const existingTriggersSnap = await db.collection('studioTriggers').get()
     for (const trigDoc of existingTriggersSnap.docs) {
       const trigData = trigDoc.data()
       if (
         !trigData.userId ||
-        (targetUserEmail && trigData.userEmail && trigData.userEmail === targetUserEmail)
+        (connectedEmail && trigData.userEmail && trigData.userEmail === connectedEmail)
       ) {
         await trigDoc.ref.set(
           {
-            userId: String(targetUserId),
-            userEmail: targetUserEmail,
+            userId,
+            userEmail: connectedEmail,
             updatedAt: FieldValue.serverTimestamp(),
           },
           { merge: true }
@@ -619,10 +709,10 @@ export async function handleOAuthCallback(req, res, db) {
       }
     }
 
-    logger.info('Successfully stored per-user offline OAuth 2.0 credentials in /studioAuth/{userId}', {
-      userId: targetUserId,
-      connectedEmail: targetUserEmail,
-      hasRefreshToken: Boolean(tokenData.refresh_token),
+    logger.info('Successfully verified and stored per-user offline OAuth 2.0 credentials in /studioAuth/{userId}', {
+      userId,
+      connectedEmail,
+      hasRefreshToken: Boolean(tokens.refresh_token),
     })
 
     res.status(200).send(`<!doctype html>
@@ -641,7 +731,7 @@ export async function handleOAuthCallback(req, res, db) {
 <body>
   <div class="box">
     <h2>Authorization Successful</h2>
-    <p>PulseWell is now authorized to fire Google Workspace Studio triggers${targetUserEmail ? ` as <b>${targetUserEmail}</b>` : ''}.</p>
+    <p>PulseWell is now authorized to fire Google Workspace Studio triggers${connectedEmail ? ` as <b>${connectedEmail}</b>` : ''}.</p>
     <p>This window will close automatically and reload your starter card.</p>
     <button onclick="window.close()">Close Window</button>
   </div>

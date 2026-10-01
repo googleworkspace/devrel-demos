@@ -26,6 +26,7 @@ export const onConfigSportsTrigger = onRequest(
   {
     region: 'europe-west1',
     invoker: ADDON_SERVICE_ACCOUNT,
+    secrets: [oauthClientId, oauthClientSecret],
   },
   (req, res) => handleConfigSportsTrigger(req, res, db)
 )
@@ -52,7 +53,7 @@ export const oauthStart = onRequest(
   {
     region: 'europe-west1',
     invoker: 'public', // must be public because the call is not made via the add-on service account
-    secrets: [oauthClientId],
+    secrets: [oauthClientId, oauthClientSecret],
   },
   (req, res) => handleOAuthStart(req, res)
 )

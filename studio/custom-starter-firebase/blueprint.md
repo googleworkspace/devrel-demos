@@ -37,10 +37,10 @@ sequenceDiagram
     Admin->>Studio: Add "New Sports Registration" starter to Flow
     Studio->>ConfigFn: POST /onConfigSportsTrigger (authorizationEventObject)
     ConfigFn->>DB: Resolve userId (sub) & check /studioAuth/{userId}
-    ConfigFn-->>Studio: Return Card UI (Authorize button + Category Filter dropdown)
-    Admin->>ConfigFn: Click "Authorize PulseWell Offline Access" -> GET /oauthStart?userId=...
+    ConfigFn-->>Studio: Return Card UI (Authorize button with HMAC-signed state + Category Filter)
+    Admin->>ConfigFn: Click "Authorize PulseWell Offline Access" -> GET /oauthStart?state=<signedState>
     ConfigFn->>Secrets: Read OAUTH_CLIENT_ID & OAUTH_CLIENT_SECRET
-    ConfigFn->>DB: GET /oauthCallback -> Exchange code & store refreshToken in /studioAuth/{userId}
+    ConfigFn->>DB: GET /oauthCallback -> Verify state & id_token (sub === state.userId), store refreshToken in /studioAuth/{userId}
     end
 
     rect rgb(240, 253, 244)
@@ -92,9 +92,9 @@ customstarter/
 │   └── data/
 │       └── sportsOfferings.js      # Default sports catalog & client-side payload preview builder
 └── functions/
-    ├── package.json                # Backend dependencies (firebase-admin v12, firebase-functions v2)
+    ├── package.json                # Backend dependencies (firebase-admin v13, firebase-functions v6, google-auth-library v10)
     ├── index.js                    # 2nd Gen Cloud Functions declarations & runtime metadata
-    ├── studioConfigManage.js       # Card builder, per-user OAuth 2.0 flow, subscription & fire logic
+    ├── studioConfigManage.js       # Card builder, HMAC-signed OAuth 2.0 flow, subscription & fire logic
     └── starterPayload.js           # Builds FireTriggerRequest payload & UUID v4 requestId
 ```
 
@@ -108,7 +108,6 @@ The starter is registered with Google Workspace Studio as an HTTP Add-on using `
 - **OAuth Scopes**:
   - `https://www.googleapis.com/auth/workspace.studio.trigger` — Required to call `workspacestudio.googleapis.com/v1/triggers/{triggerId}:fire`.
   - `https://www.googleapis.com/auth/userinfo.email` — Allows the backend to identify the invoking Google Workspace user (`userId` and `userEmail`).
-  - `https://www.googleapis.com/auth/script.locale` — Required by Google Workspace Add-ons runtime when rendering cards.
 - **Starter Element (`newSportsRegistrationStarter`)**:
   - **Input Variable**: `categoryFilter` (`STRING`, `SINGLE`) — Lets the flow author watch `"ALL"` categories or a specific category (`"Mind & Body"`, `"Cardio & Endurance"`, `"Strength & Mobility"`, `"Team Sports"`).
   - **Output Variables** (emitted to downstream steps in the flow):
@@ -130,13 +129,13 @@ Because registrations occur asynchronously in the future (long after the 1-hour 
 1. **User Identity Resolution (`resolveEventUserIdentity`)**:
    - Every HTTP call from Workspace Studio to `onConfigSportsTrigger` or `onManageSportsTrigger` carries `authorizationEventObject.userIdToken` and/or `authorizationEventObject.userOAuthToken`.
    - The backend extracts the user's immutable Google `sub` (`userId`) and `userEmail` from `userIdToken` or via `https://www.googleapis.com/oauth2/v2/userinfo`.
-2. **Configuration Card (`handleConfigSportsTrigger`)**:
+2. **Configuration Card & Signed State (`handleConfigSportsTrigger` & `createSignedOAuthState`)**:
    - Checks `/studioAuth/{userId}` in Firestore to see if this specific user has already granted an offline `refreshToken`.
-   - Renders a Google Workspace Card containing an **Authorize PulseWell Offline Access** button (`openAs: "OVERLAY"`, `onClose: "RELOAD"`) that links to `/oauthStart?userId=...&userEmail=...`, plus the `categoryFilter` dropdown widget.
-3. **OAuth 2.0 Flow (`handleOAuthStart` & `handleOAuthCallback`)**:
-   - Reads `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` from **Google Cloud Secret Manager** using `defineSecret` (`firebase-functions/params`).
-   - Redirects the user to `https://accounts.google.com/o/oauth2/v2/auth` with `access_type=offline`, `prompt=consent`, `scope="https://www.googleapis.com/auth/workspace.studio.trigger openid email profile"`, and a base64url-encoded `state` payload containing `{ userId, userEmail }`.
-   - Exchanges the authorization code at `https://oauth2.googleapis.com/token`, verifies the user's Google `userId`, and stores the `refreshToken` in `/studioAuth/{userId}`.
+   - Mints a 15-minute **HMAC-SHA256 signed `state` token** (`{ userId, userEmail, exp }`) signed with `OAUTH_CLIENT_SECRET`, and renders a Google Workspace Card containing an **Authorize PulseWell Offline Access** button (`openAs: "OVERLAY"`, `onClose: "RELOAD"`) that links to `/oauthStart?state=<signedState>`.
+3. **Hardened OAuth 2.0 Flow (`handleOAuthStart` & `handleOAuthCallback`)**:
+   - Even though `oauthStart` and `oauthCallback` use `invoker: 'public'`, both endpoints first verify the HMAC signature and expiration of `?state=...` using `verifySignedOAuthState` (rejecting any unauthenticated external caller with `403 Forbidden`).
+   - `handleOAuthStart` uses `google-auth-library` (`OAuth2Client.generateAuthUrl`) to redirect the user to Google's OAuth 2.0 consent screen (`access_type=offline`, `prompt=consent`, `scope="https://www.googleapis.com/auth/workspace.studio.trigger openid email profile"`).
+   - `handleOAuthCallback` exchanges the authorization code via `oauth2Client.getToken(code)`, cryptographically verifies the returned `id_token` (`oauth2Client.verifyIdToken`), and enforces that the consenting Google account (`ticket.getPayload().sub`) strictly matches `verifiedState.userId` before saving the `refreshToken` in `/studioAuth/{userId}`.
 
 ---
 

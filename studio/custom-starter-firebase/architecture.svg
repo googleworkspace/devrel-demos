@@ -66,11 +66,11 @@
 
   <!-- Step 3 -->
   <line x1="315" y1="254" x2="123" y2="254" stroke="#2563eb" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arrow-blue)"/>
-  <text x="215" y="248" text-anchor="middle" font-size="11" fill="#1e3a8a">3. Return Card UI (Authorize button + Category Filter)</text>
+  <text x="215" y="248" text-anchor="middle" font-size="11" fill="#1e3a8a">3. Return Card UI (Authorize button w/ signed state + Filter)</text>
 
   <!-- Step 4 -->
   <line x1="315" y1="290" x2="714" y2="290" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/>
-  <text x="515" y="284" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">4. OAuth Overlay (/oauthStart → /oauthCallback): Save refreshToken in /studioAuth/{userId}</text>
+  <text x="515" y="284" text-anchor="middle" font-size="11" font-weight="600" fill="#1e3a8a">4. OAuth Overlay (/oauthStart?state=... → /oauthCallback): Verify state &amp; id_token, save refreshToken</text>
 
   <!-- ================= PHASE 2 ================= -->
   <rect x="30" y="332" width="940" height="145" rx="10" fill="#ecfdf5" fill-opacity="0.75" stroke="#a7f3d0" stroke-width="1.5"/>

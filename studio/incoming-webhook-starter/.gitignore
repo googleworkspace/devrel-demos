@@ -1,5 +1,5 @@
 # Sqlite
-*.sqllite
+*.sqlite
 *.sqlite-shm
 *.sqlite-wal
 

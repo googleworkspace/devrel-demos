@@ -1,0 +1,32 @@
+{
+  "name": "webhook-studio-addon",
+  "version": "1.0.0",
+  "description": "Generic Incoming Webhook Bridge Starter for Google Workspace Studio (TypeScript + Express + Drizzle ORM + built-in node:sqlite)",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --env-file .env dist/server.js",
+    "dev": "tsx watch --env-file .env src/server.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "tsx src/db/push.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "drizzle-orm": "^0.39.3",
+    "express": "^4.21.2",
+    "google-auth-library": "^9.15.1"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.4",
+    "@types/supertest": "^6.0.2",
+    "drizzle-kit": "^0.30.4",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.6"
+  }
+}

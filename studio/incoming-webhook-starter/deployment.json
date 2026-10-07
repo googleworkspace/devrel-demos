@@ -1,0 +1,58 @@
+{
+	"oauthScopes": [
+		"openid",
+		"https://www.googleapis.com/auth/script.locale",
+		"https://www.googleapis.com/auth/workspace.studio.trigger"
+	],
+	"addOns": {
+		"common": {
+			"name": "Generic Incoming Webhook Bridge",
+			"logoUrl": "https://www.gstatic.com/images/icons/material/system/2x/webhook_black_48dp.png",
+			"useLocaleFromApp": true
+		},
+		"studio": {
+			"flows": {
+				"workflowElements": [
+					{
+						"id": "incoming_webhook_starter",
+						"state": "ACTIVE",
+						"name": "When a webhook is received",
+						"description": "Triggers the workflow when an arbitrary HTTP POST payload (up to 1 KB) is sent to your unique obfuscated webhook URL.",
+						"workflowTrigger": {
+							"onConfigFunction": "https://DEPLOYED_HOST_NAME/studio/on-config",
+							"onManageFunction": "https://DEPLOYED_HOST_NAME/studio/on-manage",
+							"inputs": [
+								{
+									"id": "instanceId",
+									"description": "Internal instance correlation UUID generated on configuration card load.",
+									"cardinality": "SINGLE",
+									"dataType": {
+										"basicType": "STRING"
+									}
+								},
+								{
+									"id": "requireApiKey",
+									"description": "Whether incoming webhook requests must provide an Authorization: ApiKey <secret> header.",
+									"cardinality": "SINGLE",
+									"dataType": {
+										"basicType": "BOOLEAN"
+									}
+								}
+							],
+							"outputs": [
+								{
+									"id": "rawPayload",
+									"description": "The raw UTF-8 payload string posted to the webhook URL (maximum 1 KB).",
+									"cardinality": "SINGLE",
+									"dataType": {
+										"basicType": "STRING"
+									}
+								}
+							]
+						}
+					}
+				]
+			}
+		}
+	}
+}

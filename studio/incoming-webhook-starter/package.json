@@ -30,7 +30,7 @@
 		"supertest": "^7.0.0",
 		"tsx": "^4.19.2",
 		"typescript": "^5.7.3",
-		"vitest": "^3.0.6"
+		"vitest": "^5.0.3"
 	},
 	"allowScripts": {
 		"better-sqlite3@13.0.3": true

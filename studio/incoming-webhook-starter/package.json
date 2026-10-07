@@ -15,7 +15,7 @@
 	"dependencies": {
 		"better-sqlite3": "^13.0.3",
 		"cookie-parser": "^1.4.7",
-		"drizzle-orm": "^0.39.3",
+		"drizzle-orm": "^0.45.2",
 		"express": "^4.21.2",
 		"google-auth-library": "^9.15.1"
 	},

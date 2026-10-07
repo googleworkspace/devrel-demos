@@ -1,72 +1,76 @@
-import { Router, type Request, type Response } from 'express';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { OAuth2Client } from 'google-auth-library';
-import { getBaseUrl } from '../utils/url.js';
-import { getUserById, upsertUserTokens, updateCachedAccessToken } from '../db/index.js';
-import { verifyOAuthWebIdToken } from './jwt.js';
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { type Request, type Response, Router } from "express";
+import { CodeChallengeMethod, OAuth2Client } from "google-auth-library";
+import {
+	getUserById,
+	updateCachedAccessToken,
+	upsertUserTokens,
+} from "../db/index.js";
+import { getBaseUrl } from "../utils/url.js";
+import { verifyOAuthWebIdToken } from "./jwt.js";
 
 export const authRouter = Router();
 
 const SCOPES = [
-  'openid',
-  'https://www.googleapis.com/auth/workspace.studio.trigger',
+	"openid",
+	"https://www.googleapis.com/auth/workspace.studio.trigger",
 ];
 
-const CSRF_COOKIE_NAME = 'webhook_oauth_csrf';
-const SESSION_COOKIE_NAME = 'webhook_oauth_session';
+const CSRF_COOKIE_NAME = "webhook_oauth_csrf";
+const SESSION_COOKIE_NAME = "webhook_oauth_session";
 
 export interface OAuthTokenExchangeResult {
-  refreshToken: string;
-  accessToken: string;
-  expiryDateMs: number;
-  idToken: string;
+	refreshToken: string;
+	accessToken: string;
+	expiryDateMs: number;
+	idToken: string;
 }
 
 export type TokenExchangeFn = (params: {
-  code: string;
-  codeVerifier: string;
-  redirectUri: string;
+	code: string;
+	codeVerifier: string;
+	redirectUri: string;
 }) => Promise<OAuthTokenExchangeResult>;
 
 export type TokenRefreshFn = (refreshToken: string) => Promise<{
-  accessToken: string;
-  expiryDateMs: number;
+	accessToken: string;
+	expiryDateMs: number;
 }>;
 
 let customTokenExchanger: TokenExchangeFn | null = null;
 let customTokenRefresher: TokenRefreshFn | null = null;
 
 export function setTokenExchangerForTesting(fn: TokenExchangeFn | null): void {
-  customTokenExchanger = fn;
+	customTokenExchanger = fn;
 }
 
 export function setTokenRefresherForTesting(fn: TokenRefreshFn | null): void {
-  customTokenRefresher = fn;
+	customTokenRefresher = fn;
 }
 
 function createOAuthClient(redirectUri?: string): OAuth2Client {
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID ||
-    'placeholder-oauth-client-id';
-  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET ||
-    'placeholder-oauth-client-secret';
-  return new OAuth2Client(clientId, clientSecret, redirectUri);
+	const clientId =
+		process.env.GOOGLE_OAUTH_CLIENT_ID || "placeholder-oauth-client-id";
+	const clientSecret =
+		process.env.GOOGLE_OAUTH_CLIENT_SECRET || "placeholder-oauth-client-secret";
+	return new OAuth2Client(clientId, clientSecret, redirectUri);
 }
 
 function base64UrlEncode(buf: Buffer): string {
-  return buf
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+	return buf
+		.toString("base64")
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_")
+		.replace(/=+$/, "");
 }
 
 function safeCompareStrings(a: string, b: string): boolean {
-  const bufA = Buffer.from(a, 'utf8');
-  const bufB = Buffer.from(b, 'utf8');
-  if (bufA.length !== bufB.length) {
-    return false;
-  }
-  return timingSafeEqual(bufA, bufB);
+	const bufA = Buffer.from(a, "utf8");
+	const bufB = Buffer.from(b, "utf8");
+	if (bufA.length !== bufB.length) {
+		return false;
+	}
+	return timingSafeEqual(bufA, bufB);
 }
 
 /**
@@ -74,19 +78,19 @@ function safeCompareStrings(a: string, b: string): boolean {
  * Prevents silent login CSRF and session fixation by requiring an explicit POST
  * submission backed by a signed HttpOnly CSRF cookie before redirecting to Google.
  */
-authRouter.get('/start', (req: Request, res: Response) => {
-  const csrfToken = randomBytes(24).toString('hex');
+authRouter.get("/start", (req: Request, res: Response) => {
+	const csrfToken = randomBytes(24).toString("hex");
 
-  res.cookie(CSRF_COOKIE_NAME, csrfToken, {
-    httpOnly: true,
-    secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
-    sameSite: 'lax',
-    signed: true,
-    maxAge: 10 * 60 * 1000, // 10 minutes
-  });
+	res.cookie(CSRF_COOKIE_NAME, csrfToken, {
+		httpOnly: true,
+		secure: req.secure || req.headers["x-forwarded-proto"] === "https",
+		sameSite: "lax",
+		signed: true,
+		maxAge: 10 * 60 * 1000, // 10 minutes
+	});
 
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(`<!DOCTYPE html>
+	res.setHeader("Content-Type", "text/html; charset=utf-8");
+	res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -175,46 +179,53 @@ authRouter.get('/start', (req: Request, res: Response) => {
  * Step 2: Initiate OAuth Flow (`POST /auth/initiate`)
  * Verifies CSRF token, generates OAuth state + PKCE challenge, and redirects to Google.
  */
-authRouter.post('/initiate', (req: Request, res: Response) => {
-  const cookieCsrf = req.signedCookies?.[CSRF_COOKIE_NAME];
-  const formCsrf = req.body?.csrfToken;
+authRouter.post("/initiate", (req: Request, res: Response) => {
+	const cookieCsrf = req.signedCookies?.[CSRF_COOKIE_NAME];
+	const formCsrf = req.body?.csrfToken;
 
-  if (!cookieCsrf || !formCsrf || !safeCompareStrings(String(cookieCsrf), String(formCsrf))) {
-    res.status(403).send('Invalid or expired CSRF token. Please reload the authorization page.');
-    return;
-  }
+	if (
+		!cookieCsrf ||
+		!formCsrf ||
+		!safeCompareStrings(String(cookieCsrf), String(formCsrf))
+	) {
+		res
+			.status(403)
+			.send(
+				"Invalid or expired CSRF token. Please reload the authorization page.",
+			);
+		return;
+	}
 
-  res.clearCookie(CSRF_COOKIE_NAME);
+	res.clearCookie(CSRF_COOKIE_NAME);
 
-  const state = randomBytes(24).toString('hex');
-  const codeVerifier = base64UrlEncode(randomBytes(32));
-  const codeChallenge = base64UrlEncode(
-    createHash('sha256').update(codeVerifier).digest()
-  );
+	const state = randomBytes(24).toString("hex");
+	const codeVerifier = base64UrlEncode(randomBytes(32));
+	const codeChallenge = base64UrlEncode(
+		createHash("sha256").update(codeVerifier).digest(),
+	);
 
-  const sessionPayload = JSON.stringify({ state, codeVerifier });
-  res.cookie(SESSION_COOKIE_NAME, sessionPayload, {
-    httpOnly: true,
-    secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
-    sameSite: 'lax',
-    signed: true,
-    maxAge: 10 * 60 * 1000,
-  });
+	const sessionPayload = JSON.stringify({ state, codeVerifier });
+	res.cookie(SESSION_COOKIE_NAME, sessionPayload, {
+		httpOnly: true,
+		secure: req.secure || req.headers["x-forwarded-proto"] === "https",
+		sameSite: "lax",
+		signed: true,
+		maxAge: 10 * 60 * 1000,
+	});
 
-  const redirectUri = `${getBaseUrl(req)}/auth/callback`;
-  const oauthClient = createOAuthClient(redirectUri);
+	const redirectUri = `${getBaseUrl(req)}/auth/callback`;
+	const oauthClient = createOAuthClient(redirectUri);
 
-  const authUrl = oauthClient.generateAuthUrl({
-    access_type: 'offline',
-    prompt: 'consent',
-    scope: SCOPES,
-    state,
-    code_challenge: codeChallenge,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    code_challenge_method: 'S256' as any,
-  });
+	const authUrl = oauthClient.generateAuthUrl({
+		access_type: "offline",
+		prompt: "consent",
+		scope: SCOPES,
+		state,
+		code_challenge: codeChallenge,
+		code_challenge_method: CodeChallengeMethod.S256,
+	});
 
-  res.redirect(302, authUrl);
+	res.redirect(302, authUrl);
 });
 
 /**
@@ -223,75 +234,89 @@ authRouter.post('/initiate', (req: Request, res: Response) => {
  * extracts immutable `user_id` (`sub` claim), and persists `refresh_token`, `access_token`,
  * and `access_token_expiry` in SQLite.
  */
-authRouter.get('/callback', async (req: Request, res: Response) => {
-  try {
-    const rawSession = req.signedCookies?.[SESSION_COOKIE_NAME];
-    if (!rawSession) {
-      res.status(400).send('OAuth session expired or missing. Please start authorization again.');
-      return;
-    }
+authRouter.get("/callback", async (req: Request, res: Response) => {
+	try {
+		const rawSession = req.signedCookies?.[SESSION_COOKIE_NAME];
+		if (!rawSession) {
+			res
+				.status(400)
+				.send(
+					"OAuth session expired or missing. Please start authorization again.",
+				);
+			return;
+		}
 
-    const { state: expectedState, codeVerifier } = JSON.parse(rawSession) as {
-      state: string;
-      codeVerifier: string;
-    };
+		const { state: expectedState, codeVerifier } = JSON.parse(rawSession) as {
+			state: string;
+			codeVerifier: string;
+		};
 
-    const queryState = String(req.query.state || '');
-    const code = String(req.query.code || '');
+		const queryState = String(req.query.state || "");
+		const code = String(req.query.code || "");
 
-    if (!expectedState || !queryState || !safeCompareStrings(expectedState, queryState)) {
-      res.status(403).send('OAuth state mismatch.');
-      return;
-    }
+		if (
+			!expectedState ||
+			!queryState ||
+			!safeCompareStrings(expectedState, queryState)
+		) {
+			res.status(403).send("OAuth state mismatch.");
+			return;
+		}
 
-    if (!code) {
-      res.status(400).send('Missing authorization code.');
-      return;
-    }
+		if (!code) {
+			res.status(400).send("Missing authorization code.");
+			return;
+		}
 
-    res.clearCookie(SESSION_COOKIE_NAME);
+		res.clearCookie(SESSION_COOKIE_NAME);
 
-    const redirectUri = `${getBaseUrl(req)}/auth/callback`;
+		const redirectUri = `${getBaseUrl(req)}/auth/callback`;
 
-    let tokenData: OAuthTokenExchangeResult;
-    if (customTokenExchanger) {
-      tokenData = await customTokenExchanger({ code, codeVerifier, redirectUri });
-    } else {
-      const oauthClient = createOAuthClient(redirectUri);
-      const { tokens } = await oauthClient.getToken({
-        code,
-        codeVerifier,
-      });
+		let tokenData: OAuthTokenExchangeResult;
+		if (customTokenExchanger) {
+			tokenData = await customTokenExchanger({
+				code,
+				codeVerifier,
+				redirectUri,
+			});
+		} else {
+			const oauthClient = createOAuthClient(redirectUri);
+			const { tokens } = await oauthClient.getToken({
+				code,
+				codeVerifier,
+			});
 
-      if (!tokens.refresh_token) {
-        throw new Error(
-          'Google did not return a refresh_token. Ensure access_type=offline and prompt=consent are set.'
-        );
-      }
-      if (!tokens.id_token) {
-        throw new Error('Google did not return an id_token. Ensure openid scope is requested.');
-      }
+			if (!tokens.refresh_token) {
+				throw new Error(
+					"Google did not return a refresh_token. Ensure access_type=offline and prompt=consent are set.",
+				);
+			}
+			if (!tokens.id_token) {
+				throw new Error(
+					"Google did not return an id_token. Ensure openid scope is requested.",
+				);
+			}
 
-      tokenData = {
-        refreshToken: tokens.refresh_token,
-        accessToken: tokens.access_token || '',
-        expiryDateMs: tokens.expiry_date || Date.now() + 3600 * 1000,
-        idToken: tokens.id_token,
-      };
-    }
+			tokenData = {
+				refreshToken: tokens.refresh_token,
+				accessToken: tokens.access_token || "",
+				expiryDateMs: tokens.expiry_date || Date.now() + 3600 * 1000,
+				idToken: tokens.id_token,
+			};
+		}
 
-    // Verify OAuth web app ID token against OAUTH_CLIENT_ID to obtain stable user_id (sub)
-    const userId = await verifyOAuthWebIdToken(tokenData.idToken);
+		// Verify OAuth web app ID token against OAUTH_CLIENT_ID to obtain stable user_id (sub)
+		const userId = await verifyOAuthWebIdToken(tokenData.idToken);
 
-    upsertUserTokens({
-      userId,
-      refreshToken: tokenData.refreshToken,
-      accessToken: tokenData.accessToken,
-      accessTokenExpiry: tokenData.expiryDateMs,
-    });
+		upsertUserTokens({
+			userId,
+			refreshToken: tokenData.refreshToken,
+			accessToken: tokenData.accessToken,
+			accessTokenExpiry: tokenData.expiryDateMs,
+		});
 
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(`<!DOCTYPE html>
+		res.setHeader("Content-Type", "text/html; charset=utf-8");
+		res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -338,10 +363,13 @@ authRouter.get('/callback', async (req: Request, res: Response) => {
   </script>
 </body>
 </html>`);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error during OAuth callback';
-    res.status(500).send(`OAuth Authorization Failed: ${message}`);
-  }
+	} catch (err) {
+		const message =
+			err instanceof Error
+				? err.message
+				: "Unknown error during OAuth callback";
+		res.status(500).send(`OAuth Authorization Failed: ${message}`);
+	}
 });
 
 /**
@@ -352,40 +380,44 @@ authRouter.get('/callback', async (req: Request, res: Response) => {
  *   persists the new `access_token` + `access_token_expiry` in SQLite.
  */
 export async function getValidAccessToken(userId: string): Promise<string> {
-  const user = getUserById(userId);
-  if (!user || !user.refreshToken) {
-    throw new Error(`No stored OAuth credentials found for user_id=${userId}`);
-  }
+	const user = getUserById(userId);
+	if (!user?.refreshToken) {
+		throw new Error(`No stored OAuth credentials found for user_id=${userId}`);
+	}
 
-  const now = Date.now();
-  const safetyMarginMs = 60 * 1000; // 60 seconds buffer
+	const now = Date.now();
+	const safetyMarginMs = 60 * 1000; // 60 seconds buffer
 
-  if (
-    user.accessToken &&
-    user.accessTokenExpiry &&
-    user.accessTokenExpiry > now + safetyMarginMs
-  ) {
-    return user.accessToken;
-  }
+	if (
+		user.accessToken &&
+		user.accessTokenExpiry &&
+		user.accessTokenExpiry > now + safetyMarginMs
+	) {
+		return user.accessToken;
+	}
 
-  // Token expired or not cached — fetch fresh access token using refresh_token
-  let refreshed: { accessToken: string; expiryDateMs: number };
-  if (customTokenRefresher) {
-    refreshed = await customTokenRefresher(user.refreshToken);
-  } else {
-    const oauthClient = createOAuthClient();
-    oauthClient.setCredentials({ refresh_token: user.refreshToken });
-    const response = await oauthClient.refreshAccessToken();
-    const creds = response.credentials;
-    if (!creds.access_token) {
-      throw new Error('Failed to refresh access token from Google.');
-    }
-    refreshed = {
-      accessToken: creds.access_token,
-      expiryDateMs: creds.expiry_date || Date.now() + 3600 * 1000,
-    };
-  }
+	// Token expired or not cached — fetch fresh access token using refresh_token
+	let refreshed: { accessToken: string; expiryDateMs: number };
+	if (customTokenRefresher) {
+		refreshed = await customTokenRefresher(user.refreshToken);
+	} else {
+		const oauthClient = createOAuthClient();
+		oauthClient.setCredentials({ refresh_token: user.refreshToken });
+		const response = await oauthClient.refreshAccessToken();
+		const creds = response.credentials;
+		if (!creds.access_token) {
+			throw new Error("Failed to refresh access token from Google.");
+		}
+		refreshed = {
+			accessToken: creds.access_token,
+			expiryDateMs: creds.expiry_date || Date.now() + 3600 * 1000,
+		};
+	}
 
-  updateCachedAccessToken(userId, refreshed.accessToken, refreshed.expiryDateMs);
-  return refreshed.accessToken;
+	updateCachedAccessToken(
+		userId,
+		refreshed.accessToken,
+		refreshed.expiryDateMs,
+	);
+	return refreshed.accessToken;
 }

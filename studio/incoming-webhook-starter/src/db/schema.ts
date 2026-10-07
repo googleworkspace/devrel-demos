@@ -1,16 +1,16 @@
-import { sqliteTable, text, integer, index } from 'drizzle-orm/sqlite-core';
+import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 /**
  * Stores user OAuth credentials keyed by their immutable Google Account ID
  * (`sub` claim from Google ID tokens). Email is intentionally omitted to minimize
  * scope requirements.
  */
-export const users = sqliteTable('users', {
-  userId: text('user_id').primaryKey(),
-  refreshToken: text('refresh_token').notNull(),
-  accessToken: text('access_token'),
-  accessTokenExpiry: integer('access_token_expiry'),
-  updatedAt: integer('updated_at').notNull(),
+export const users = sqliteTable("users", {
+	userId: text("user_id").primaryKey(),
+	refreshToken: text("refresh_token").notNull(),
+	accessToken: text("access_token"),
+	accessTokenExpiry: integer("access_token_expiry"),
+	updatedAt: integer("updated_at").notNull(),
 });
 
 /**
@@ -27,24 +27,27 @@ export const users = sqliteTable('users', {
  *   (`ORDER BY updated_at DESC`) is selected.
  */
 export const subscriptions = sqliteTable(
-  'subscriptions',
-  {
-    triggerId: text('trigger_id').primaryKey(),
-    instanceId: text('instance_id').notNull(),
-    userId: text('user_id')
-      .notNull()
-      .references(() => users.userId, { onDelete: 'cascade' }),
-    notifyUri: text('notify_uri').notNull(),
-    requireApiKey: integer('require_api_key', { mode: 'boolean' })
-      .notNull()
-      .default(false),
-    status: text('status').notNull().default('ACTIVE'),
-    createdAt: integer('created_at').notNull(),
-    updatedAt: integer('updated_at').notNull(),
-  },
-  (table) => [
-    index('idx_subscriptions_instance_updated').on(table.instanceId, table.updatedAt),
-  ]
+	"subscriptions",
+	{
+		triggerId: text("trigger_id").primaryKey(),
+		instanceId: text("instance_id").notNull(),
+		userId: text("user_id")
+			.notNull()
+			.references(() => users.userId, { onDelete: "cascade" }),
+		notifyUri: text("notify_uri").notNull(),
+		requireApiKey: integer("require_api_key", { mode: "boolean" })
+			.notNull()
+			.default(false),
+		status: text("status").notNull().default("ACTIVE"),
+		createdAt: integer("created_at").notNull(),
+		updatedAt: integer("updated_at").notNull(),
+	},
+	(table) => [
+		index("idx_subscriptions_instance_updated").on(
+			table.instanceId,
+			table.updatedAt,
+		),
+	],
 );
 
 /**
@@ -59,18 +62,16 @@ export const subscriptions = sqliteTable(
  * `subscriptions` record for that `instance_id` is deleted.
  */
 export const secrets = sqliteTable(
-  'secrets',
-  {
-    secretId: text('secret_id').primaryKey(),
-    instanceId: text('instance_id').notNull(),
-    userId: text('user_id').notNull(),
-    label: text('label').notNull(),
-    secretHash: text('secret_hash').notNull(),
-    createdAt: integer('created_at').notNull(),
-  },
-  (table) => [
-    index('idx_secrets_instance').on(table.instanceId),
-  ]
+	"secrets",
+	{
+		secretId: text("secret_id").primaryKey(),
+		instanceId: text("instance_id").notNull(),
+		userId: text("user_id").notNull(),
+		label: text("label").notNull(),
+		secretHash: text("secret_hash").notNull(),
+		createdAt: integer("created_at").notNull(),
+	},
+	(table) => [index("idx_secrets_instance").on(table.instanceId)],
 );
 
 export type UserRecord = typeof users.$inferSelect;

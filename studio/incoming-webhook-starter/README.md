@@ -36,7 +36,17 @@ It serves as a bridge between external services and your automated Workspace wor
 npm install
 ```
 
-### 2. Database Generation & Setup
+### 2. Environment Configuration
+
+Copy the example environment file and configure your credentials:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and fill in your Google OAuth Web App client credentials and Google Workspace Add-on service account / client IDs.
+
+### 3. Database Generation & Setup
 
 This demo uses SQLite to store trigger configurations and user credentials. Run the following commands to generate and push the database schema:
 
@@ -48,7 +58,7 @@ npm run db:generate
 npm run db:push
 ```
 
-### 3. Build the Project
+### 4. Build the Project
 
 Compile the TypeScript code to JavaScript:
 
@@ -56,7 +66,7 @@ Compile the TypeScript code to JavaScript:
 npm run build
 ```
 
-### 4. Run the Project
+### 5. Run the Project
 
 - **Development Mode** (with auto-reload on file changes):
   ```bash
